@@ -7,14 +7,12 @@ from functools import partial
 
 import numpy as np
 import panel as pn
-import param
 
 from bokeh.models import (
-    CustomJS, FactorRange, DatetimeAxis, ToolbarBox, Range1d,
+    CustomJS, FactorRange, DatetimeAxis, Range1d,
     DataRange1d, PolyDrawTool, BoxEditTool, PolyEditTool,
     FreehandDrawTool, PointDrawTool
 )
-from panel.io.model import hold
 from panel.io.state import state
 from pyviz_comms import JS_CALLBACK
 from tornado import gen
@@ -22,7 +20,7 @@ from tornado import gen
 from ...core import OrderedDict
 from ...core.options import CallbackError
 from ...core.util import (
-    datetime_types, dimension_sanitizer, isscalar, dt64_to_dt
+    datetime_types, dimension_sanitizer, dt64_to_dt
 )
 from ...element import Table
 from ...streams import (
@@ -32,11 +30,10 @@ from ...streams import (
     BoxEdit, PointDraw, PolyDraw, PolyEdit, CDSStream, FreehandDraw,
     CurveEdit, SelectionXY, Lasso,
 )
-from ..links import (
+from ..links import ( # noqa
     Link, RectanglesTableLink, DataLink, RangeToolLink, SelectionLink,
     VertexTableLink
 )
-from ..plot import GenericElementPlot, GenericOverlayPlot
 from ..renderer import panel_version
 from .util import convert_timestamp
 
