@@ -13,10 +13,10 @@ from ..core.data import MultiInterface
 from ..core.dimension import Dimension, asdim
 from ..core.util import OrderedDict, disable_constant
 from .geom import Geometry
-from .selection import SelectionIndexExpr
+from .selection import SelectionPolyExpr
 
 
-class Path(Geometry):
+class Path(SelectionPolyExpr, Geometry):
     """
     The Path element represents one or more of path geometries with
     associated values. Each path geometry may be split into
@@ -205,7 +205,7 @@ class Path(Geometry):
 
 
 
-class Contours(SelectionIndexExpr, Path):
+class Contours(Path):
     """
     The Contours element is a subtype of a Path which is characterized
     by the fact that each path geometry may only be associated with
@@ -247,14 +247,6 @@ class Contours(SelectionIndexExpr, Path):
     group = param.String(default='Contours', constant=True)
 
     _level_vdim = Dimension('Level') # For backward compatibility
-
-    def _get_selection_expr_for_stream_value(self, **kwargs):
-        expr, _, _ = super(Contours, self)._get_selection_expr_for_stream_value(**kwargs)
-        if expr:
-            region = self.pipeline(self.dataset.select(expr))
-        else:
-            region = self.iloc[:0]
-        return expr, _, region
 
     def __init__(self, data, kdims=None, vdims=None, **params):
         data = [] if data is None else data
@@ -437,13 +429,13 @@ class Box(BaseShape):
 
         half_width = (self.width * self.aspect)/ 2.0
         half_height = self.height / 2.0
-        (l,b,r,t) = (x-half_width, y-half_height, x+half_width, y+half_height)
-
+        (l,b,r,t) = (-half_width, -half_height, half_width, half_height)
         box = np.array([(l, b), (l, t), (r, t), (r, b),(l, b)])
         rot = np.array([[np.cos(self.orientation), -np.sin(self.orientation)],
                         [np.sin(self.orientation), np.cos(self.orientation)]])
 
-        self.data = [np.tensordot(rot, box.T, axes=[1,0]).T]
+        xs, ys = np.tensordot(rot, box.T, axes=[1,0])
+        self.data = [np.column_stack([xs+x, ys+y])]
 
 
 class Ellipse(BaseShape):

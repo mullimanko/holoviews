@@ -877,6 +877,169 @@ class TestBufferDataFrameStream(ComparisonTestCase):
         self.assertEqual(buff.data, data.iloc[:0, :].reset_index())
 
 
+class Sum(Derived):
+    v = param.Number(constant=True)
+
+    def __init__(self, val_streams, exclusive=False, base=0):
+        self.base = base
+        super(Sum, self).__init__(input_streams=val_streams, exclusive=exclusive)
+
+    @property
+    def constants(self):
+        return dict(base=self.base)
+
+    @classmethod
+    def transform_function(cls, stream_values, constants):
+        v = sum([val["v"] for val in stream_values if val["v"]])
+        return dict(v=v + constants['base'])
+
+Val = Stream.define("Val", v=0.0)
+
+
+class TestDerivedStream(ComparisonTestCase):
+
+    def test_simple_derived_stream(self):
+        # Define input streams
+        v0 = Val(v=1.0)
+        v1 = Val(v=2.0)
+
+        # Build Sum stream
+        s0 = Sum([v0, v1])
+
+        # Check outputs
+        self.assertEqual(s0.v, 3.0)
+
+        # Update v0
+        v0.event(v=7.0)
+        self.assertEqual(s0.v, 9.0)
+
+        # Update v1
+        v1.event(v=-8.0)
+        self.assertEqual(s0.v, -1.0)
+
+    def test_nested_derived_stream(self):
+        v0 = Val(v=1.0)
+        v1 = Val(v=4.0)
+        v2 = Val(v=7.0)
+
+        # Build nested sum stream
+        s1 = Sum([v0, v1])
+        s0 = Sum([s1, v2])
+
+        # Check initial value
+        self.assertEqual(s0.v, 12.0)
+
+        # Update top-level value
+        v2.event(v=8.0)
+        self.assertEqual(s0.v, 13.0)
+
+        # Update nested value
+        v1.event(v=5.0,)
+        self.assertEqual(s0.v, 14.0)
+
+    def test_derived_stream_constants(self):
+        v0 = Val(v=1.0)
+        v1 = Val(v=4.0)
+        v2 = Val(v=7.0)
+
+        # Build Sum stream with base value
+        s0 = Sum([v0, v1, v2], base=100)
+
+        # Check initial value
+        self.assertEqual(s0.v, 112.0)
+
+        # Update value
+        v2.event(v=8.0)
+        self.assertEqual(s0.v, 113.0)
+
+    def test_exclusive_derived_stream(self):
+        # Define input streams
+        v0 = Val()
+        v1 = Val(v=2.0)
+
+        # Build exclusive Sum stream
+        # In this case, all streams except the most recently updated will be reset on
+        # update
+        s0 = Sum([v0, v1], exclusive=True)
+
+        # Check outputs
+        self.assertEqual(s0.v, 2.0)
+
+        # Update v0
+        v0.event(v=7.0)
+        self.assertEqual(s0.v, 7.0)
+
+        # Update v1
+        v1.event(v=-8.0)
+        self.assertEqual(s0.v, -8.0)
+
+
+class TestHistoryStream(ComparisonTestCase):
+    def test_initial_history_stream_values(self):
+        # Check values list is initialized with initial contents of input stream
+        val = Val(v=1.0)
+        history = History(val)
+        self.assertEqual(history.contents, {"values": [val.contents]})
+
+    def test_history_stream_values_appended(self):
+        val = Val(v=1.0)
+        history = History(val)
+        # Perform a few updates on val stream
+        val.event(v=2.0)
+        val.event(v=3.0)
+        self.assertEqual(
+            history.contents,
+            {"values": [{"v": 1.0}, {"v": 2.0}, {"v": 3.0}]}
+        )
+
+        # clear
+        history.clear_history()
+        self.assertEqual(history.contents, {"values": []})
+
+    def test_history_stream_trigger_callbacks(self):
+        # Construct history stream
+        val = Val(v=1.0)
+        history = History(val)
+
+        # Register callback
+        callback_input = []
+        def cb(**kwargs):
+            callback_input.append(kwargs)
+        history.add_subscriber(cb)
+        self.assertEqual(callback_input, [])
+
+        # Perform updates on val stream and make sure history callback is triggered
+        del callback_input[:]
+        val.event(v=2.0)
+        self.assertEqual(
+            callback_input[0],
+            {"values": [{"v": 1.0}, {"v": 2.0}]}
+        )
+
+        del callback_input[:]
+        val.event(v=3.0)
+        self.assertEqual(
+            callback_input[0],
+            {"values": [{"v": 1.0}, {"v": 2.0}, {"v": 3.0}]}
+        )
+
+        # clearing history should trigger callback
+        del callback_input[:]
+        history.clear_history()
+        self.assertEqual(
+            callback_input[0],
+            {"values": []}
+        )
+
+        # Update after clearing
+        del callback_input[:]
+        val.event(v=4.0)
+        self.assertEqual(
+            callback_input[0],
+            {"values": [{"v": 4.0}]}
+        )
+
+
 class TestExprSelectionStream(ComparisonTestCase):
 
     def setUp(self):
@@ -889,13 +1052,14 @@ class TestExprSelectionStream(ComparisonTestCase):
             expr_stream = SelectionExpr(element)
 
             # Check stream properties
-            self.assertEqual(len(expr_stream._source_streams), 1)
-            self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+            self.assertEqual(len(expr_stream.input_streams), 2)
+            self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
+            self.assertIsInstance(expr_stream.input_streams[1], Lasso)
             self.assertIsNone(expr_stream.bbox)
             self.assertIsNone(expr_stream.selection_expr)
 
             # Simulate interactive update by triggering source stream
-            expr_stream._source_streams[0].event(bounds=(1, 1, 3, 4))
+            expr_stream.input_streams[0].event(bounds=(1, 1, 3, 4))
 
             # Check SelectionExpr values
             self.assertEqual(
@@ -914,13 +1078,14 @@ class TestExprSelectionStream(ComparisonTestCase):
             expr_stream = SelectionExpr(element)
 
             # Check stream properties
-            self.assertEqual(len(expr_stream._source_streams), 1)
-            self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+            self.assertEqual(len(expr_stream.input_streams), 2)
+            self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
+            self.assertIsInstance(expr_stream.input_streams[1], Lasso)
             self.assertIsNone(expr_stream.bbox)
             self.assertIsNone(expr_stream.selection_expr)
 
             # Simulate interactive update by triggering source stream
-            expr_stream._source_streams[0].event(bounds=(1, 1, 3, 4))
+            expr_stream.input_streams[0].event(bounds=(1, 1, 3, 4))
 
             # Check SelectionExpr values
             self.assertEqual(
@@ -943,13 +1108,14 @@ class TestExprSelectionStream(ComparisonTestCase):
             expr_stream = SelectionExpr(element)
 
             # Check stream properties
-            self.assertEqual(len(expr_stream._source_streams), 1)
-            self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+            self.assertEqual(len(expr_stream.input_streams), 2)
+            self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
+            self.assertIsInstance(expr_stream.input_streams[1], Lasso)
             self.assertIsNone(expr_stream.bbox)
             self.assertIsNone(expr_stream.selection_expr)
 
             # Simulate interactive update by triggering source stream
-            expr_stream._source_streams[0].event(bounds=(3, 4, 1, 1))
+            expr_stream.input_streams[0].event(bounds=(3, 4, 1, 1))
 
             # Check SelectionExpr values
             self.assertEqual(
@@ -967,30 +1133,29 @@ class TestExprSelectionStream(ComparisonTestCase):
         expr_stream = SelectionExpr(hist)
 
         # Check stream properties
-        self.assertEqual(len(expr_stream._source_streams), 1)
-        self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+        self.assertEqual(len(expr_stream.input_streams), 2)
+        self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
         self.assertIsNone(expr_stream.bbox)
         self.assertIsNone(expr_stream.selection_expr)
 
         # Simulate interactive update by triggering source stream.
         # Select second and forth bar.
-        expr_stream._source_streams[0].event(bounds=(1.5, 2.5, 4.6, 6))
+        expr_stream.input_streams[0].event(bounds=(1.5, 2.5, 4.6, 6))
         self.assertEqual(
             repr(expr_stream.selection_expr),
-            repr(dim('x').digitize(hist.edges).isin([2, 4]))
+            repr((dim('x')>=1.5)&(dim('x')<=4.6))
         )
-        self.assertEqual(expr_stream.bbox, {'x': (1.5, 4.5)})
+        self.assertEqual(expr_stream.bbox, {'x': (1.5, 4.6)})
 
         # Select third, forth, and fifth bar.  Make sure there is special
         # handling when last bar is selected to include values exactly on the
         # upper edge in the selection
-        expr_stream._source_streams[0].event(bounds=(2.5, -10, 8, 10))
+        expr_stream.input_streams[0].event(bounds=(2.5, -10, 8, 10))
         self.assertEqual(
             repr(expr_stream.selection_expr),
-            repr((dim('x').digitize(hist.edges).isin([3, 4, 5])) |
-                 (dim('x') == hist.edges[-1]))
+            repr((dim('x')>=2.5)&(dim('x')<=8))
         )
-        self.assertEqual(expr_stream.bbox, {'x': (2.5, 5.5)})
+        self.assertEqual(expr_stream.bbox, {'x': (2.5, 8)})
 
     def test_selection_expr_stream_hist_invert_axes(self):
         # Create SelectionExpr on element
@@ -1000,30 +1165,29 @@ class TestExprSelectionStream(ComparisonTestCase):
         expr_stream = SelectionExpr(hist)
 
         # Check stream properties
-        self.assertEqual(len(expr_stream._source_streams), 1)
-        self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+        self.assertEqual(len(expr_stream.input_streams), 2)
+        self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
         self.assertIsNone(expr_stream.bbox)
         self.assertIsNone(expr_stream.selection_expr)
 
         # Simulate interactive update by triggering source stream.
         # Select second and forth bar.
-        expr_stream._source_streams[0].event(bounds=(2.5, 1.5, 6, 4.6))
+        expr_stream.input_streams[0].event(bounds=(2.5, 1.5, 6, 4.6))
         self.assertEqual(
             repr(expr_stream.selection_expr),
-            repr(dim('x').digitize(hist.edges).isin([2, 4]))
+            repr((dim('x')>=1.5)&(dim('x')<=4.6))
         )
-        self.assertEqual(expr_stream.bbox, {'x': (1.5, 4.5)})
+        self.assertEqual(expr_stream.bbox, {'x': (1.5, 4.6)})
 
         # Select third, forth, and fifth bar.  Make sure there is special
         # handling when last bar is selected to include values exactly on the
         # upper edge in the selection
-        expr_stream._source_streams[0].event(bounds=(-10, 2.5, 10, 8))
+        expr_stream.input_streams[0].event(bounds=(-10, 2.5, 10, 8))
         self.assertEqual(
             repr(expr_stream.selection_expr),
-            repr((dim('x').digitize(hist.edges).isin([3, 4, 5])) |
-                 (dim('x') == hist.edges[-1]))
+            repr((dim('x')>=2.5)&(dim('x')<=8))
         )
-        self.assertEqual(expr_stream.bbox, {'x': (2.5, 5.5)})
+        self.assertEqual(expr_stream.bbox, {'x': (2.5, 8)})
 
     def test_selection_expr_stream_hist_invert_xaxis_yaxis(self):
         # Create SelectionExpr on element
@@ -1034,30 +1198,29 @@ class TestExprSelectionStream(ComparisonTestCase):
         expr_stream = SelectionExpr(hist)
 
         # Check stream properties
-        self.assertEqual(len(expr_stream._source_streams), 1)
-        self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+        self.assertEqual(len(expr_stream.input_streams), 2)
+        self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
         self.assertIsNone(expr_stream.bbox)
         self.assertIsNone(expr_stream.selection_expr)
 
         # Simulate interactive update by triggering source stream.
         # Select second and forth bar.
-        expr_stream._source_streams[0].event(bounds=(4.6, 6, 1.5, 2.5))
+        expr_stream.input_streams[0].event(bounds=(4.6, 6, 1.5, 2.5))
         self.assertEqual(
             repr(expr_stream.selection_expr),
-            repr(dim('x').digitize(hist.edges).isin([2, 4]))
+            repr((dim('x')>=1.5)&(dim('x')<=4.6))
         )
-        self.assertEqual(expr_stream.bbox, {'x': (1.5, 4.5)})
+        self.assertEqual(expr_stream.bbox, {'x': (1.5, 4.6)})
 
         # Select third, forth, and fifth bar.  Make sure there is special
         # handling when last bar is selected to include values exactly on the
         # upper edge in the selection
-        expr_stream._source_streams[0].event(bounds=(8, 10, 2.5, -10))
+        expr_stream.input_streams[0].event(bounds=(8, 10, 2.5, -10))
         self.assertEqual(
             repr(expr_stream.selection_expr),
-            repr((dim('x').digitize(hist.edges).isin([3, 4, 5])) |
-                 (dim('x') == hist.edges[-1]))
+            repr((dim('x')>=2.5)&(dim('x')<=8))
         )
-        self.assertEqual(expr_stream.bbox, {'x': (2.5, 5.5)})
+        self.assertEqual(expr_stream.bbox, {'x': (2.5, 8)})
 
     def test_selection_expr_stream_dynamic_map(self):
         for element_type in [Scatter, Points]:
@@ -1066,13 +1229,13 @@ class TestExprSelectionStream(ComparisonTestCase):
             expr_stream = SelectionExpr(dmap)
 
             # Check stream properties
-            self.assertEqual(len(expr_stream._source_streams), 1)
-            self.assertIsInstance(expr_stream._source_streams[0], BoundsXY)
+            self.assertEqual(len(expr_stream.input_streams), 2)
+            self.assertIsInstance(expr_stream.input_streams[0], SelectionXY)
             self.assertIsNone(expr_stream.bbox)
             self.assertIsNone(expr_stream.selection_expr)
 
             # Simulate interactive update by triggering source stream
-            expr_stream._source_streams[0].event(bounds=(1, 1, 3, 4))
+            expr_stream.input_streams[0].event(bounds=(1, 1, 3, 4))
 
             # Check SelectionExpr values
             self.assertEqual(

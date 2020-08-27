@@ -12,9 +12,13 @@ except:
 import param
 from pyviz_comms import extension as _pyviz_extension
 
-from ..core import DynamicMap, HoloMap, Dimensioned, ViewableElement, StoreOptions, Store
+from ..core import (
+    Dataset, DynamicMap, HoloMap, Dimensioned, ViewableElement,
+    StoreOptions, Store
+)
 from ..core.options import options_policy, Keywords, Options
 from ..core.operation import Operation
+from ..core.overlay import Overlay
 from ..core.util import basestring, merge_options_to_dict, OrderedDict
 from ..core.operation import OperationCallable
 from ..core import util
@@ -665,8 +669,9 @@ def renderer(name):
     """
     try:
         if name not in Store.renderers:
-            if Store.current_backend:
-                prev_backend = Store.current_backend
+            prev_backend = Store.current_backend
+            if Store.current_backend not in Store.renderers:
+                prev_backend = None
             extension(name)
             if prev_backend:
                 Store.set_current_backend(prev_backend)
@@ -750,7 +755,7 @@ class extension(_pyviz_extension):
         cls._backend_hooks[backend].append(callback)
 
 
-def save(obj, filename, fmt='auto', backend=None, resources='cdn', **kwargs):
+def save(obj, filename, fmt='auto', backend=None, resources='cdn', toolbar=None, title=None, **kwargs):
     """
     Saves the supplied object to file.
 
@@ -778,12 +783,27 @@ def save(obj, filename, fmt='auto', backend=None, resources='cdn', **kwargs):
         Bokeh resources used to load bokehJS components. Defaults to
         CDN, to embed resources inline for offline usage use 'inline'
         or bokeh.resources.INLINE.
+    toolbar: bool or None
+        Whether to include toolbars in the exported plot. If None,
+        display the toolbar unless fmt is `png` and backend is `bokeh`.
+        If `True`, always include the toolbar.  If `False`, do not include the
+        toolbar.
+    title: string
+        Custom title for exported HTML file
     **kwargs: dict
         Additional keyword arguments passed to the renderer,
         e.g. fps for animations
     """
     backend = backend or Store.current_backend
     renderer_obj = renderer(backend)
+    if (
+        not toolbar
+        and backend == "bokeh"
+        and (fmt == "png" or (isinstance(filename, str) and filename.endswith("png")))
+    ):
+        obj = obj.opts(toolbar=None, backend="bokeh", clone=True)
+    elif toolbar is not None and not toolbar:
+        obj = obj.opts(toolbar=None)
     if kwargs:
         renderer_obj = renderer_obj.instance(**kwargs)
     if Path is not None and isinstance(filename, Path):
@@ -796,7 +816,8 @@ def save(obj, filename, fmt='auto', backend=None, resources='cdn', **kwargs):
             fmt = formats[-1]
         if formats[-1] in supported:
             filename = '.'.join(formats[:-1])
-    return renderer_obj.save(obj, filename, fmt=fmt, resources=resources)
+    return renderer_obj.save(obj, filename, fmt=fmt, resources=resources,
+                             title=title)
 
 
 def render(obj, backend=None, **kwargs):
@@ -869,6 +890,14 @@ class Dynamic(param.ParameterizedFunction):
          with an RangeXY, this switch determines whether the
          corresponding visualization should update this stream with
          range changes originating from the newly generated axes.""")
+
+    link_dataset = param.Boolean(default=True, doc="""
+         Determines whether the output of the operation should inherit
+         the .dataset property of the input to the operation. Helpful
+         for tracking data providence for user supplied functions,
+         which do not make use of the clone method. Should be disabled
+         for operations where the output is not derived from the input
+         and instead depends on some external state.""")
 
     shared_data = param.Boolean(default=False, doc="""
         Whether the cloned DynamicMap will share the same cache.""")
@@ -979,19 +1008,25 @@ class Dynamic(param.ParameterizedFunction):
 
         def apply(element, *key, **kwargs):
             kwargs = dict(util.resolve_dependent_kwargs(self.p.kwargs), **kwargs)
-            return self._process(element, key, kwargs)
+            processed = self._process(element, key, kwargs)
+            if (self.p.link_dataset and isinstance(element, Dataset) and
+                isinstance(processed, Dataset) and processed._dataset is None):
+                processed._dataset = element.dataset
+            return processed
 
         def dynamic_operation(*key, **kwargs):
             key, obj = resolve(key, kwargs)
             return apply(obj, *key, **kwargs)
 
         operation = self.p.operation
+        op_kwargs = self.p.kwargs
         if not isinstance(operation, Operation):
             operation = function.instance(fn=apply)
+            op_kwargs = {'kwargs': op_kwargs}
         return OperationCallable(dynamic_operation, inputs=[map_obj],
                                  link_inputs=self.p.link_inputs,
                                  operation=operation,
-                                 operation_kwargs=self.p.kwargs)
+                                 operation_kwargs=op_kwargs)
 
 
     def _make_dynamic(self, hmap, dynamic_fn, streams):
@@ -1000,7 +1035,10 @@ class Dynamic(param.ParameterizedFunction):
         an equivalent DynamicMap from the HoloMap.
         """
         if isinstance(hmap, ViewableElement):
-            return DynamicMap(dynamic_fn, streams=streams)
+            dmap = DynamicMap(dynamic_fn, streams=streams)
+            if isinstance(hmap, Overlay):
+                dmap.callback.inputs[:] = list(hmap)
+            return dmap
         dim_values = zip(*hmap.data.keys())
         params = util.get_param_values(hmap)
         kdims = [d.clone(values=list(util.unique_iterator(values))) for d, values in

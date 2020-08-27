@@ -17,6 +17,7 @@ try:
     from bokeh.models import tools
     from bokeh.models import (FuncTickFormatter, PrintfTickFormatter,
                               NumeralTickFormatter, LogTicker)
+    from holoviews.plotting.bokeh.util import bokeh_version
 except:
     pass
 
@@ -36,10 +37,16 @@ class TestElementPlot(LoggingComparisonTestCase, TestBokehPlot):
         xaxis = plot.handles['xaxis']
         yaxis = plot.handles['yaxis']
         self.assertEqual(fig.title.text_font_size, {'value': '24pt'})
-        self.assertEqual(xaxis.axis_label_text_font_size, '20pt')
-        self.assertEqual(yaxis.axis_label_text_font_size, '20pt')
-        self.assertEqual(xaxis.major_label_text_font_size, '16pt')
-        self.assertEqual(yaxis.major_label_text_font_size, '16pt')
+        if bokeh_version < '2.0.2':
+            self.assertEqual(xaxis.axis_label_text_font_size, '20pt')
+            self.assertEqual(yaxis.axis_label_text_font_size, '20pt')
+            self.assertEqual(xaxis.major_label_text_font_size, '16pt')
+            self.assertEqual(yaxis.major_label_text_font_size, '16pt')
+        else:
+            self.assertEqual(xaxis.axis_label_text_font_size, '26px')
+            self.assertEqual(yaxis.axis_label_text_font_size, '26px')
+            self.assertEqual(xaxis.major_label_text_font_size, '22px')
+            self.assertEqual(yaxis.major_label_text_font_size, '22px')
 
     def test_element_font_scaling_fontsize_override_common(self):
         curve = Curve(range(10)).options(fontscale=2, fontsize='14pt', title='A title')
@@ -50,8 +57,12 @@ class TestElementPlot(LoggingComparisonTestCase, TestBokehPlot):
         self.assertEqual(fig.title.text_font_size, {'value': '28pt'})
         self.assertEqual(xaxis.axis_label_text_font_size, '28pt')
         self.assertEqual(yaxis.axis_label_text_font_size, '28pt')
-        self.assertEqual(xaxis.major_label_text_font_size, '16pt')
-        self.assertEqual(yaxis.major_label_text_font_size, '16pt')
+        if bokeh_version < '2.0.2':
+            self.assertEqual(xaxis.major_label_text_font_size, '16pt')
+            self.assertEqual(yaxis.major_label_text_font_size, '16pt')
+        else:
+            self.assertEqual(xaxis.major_label_text_font_size, '22px')
+            self.assertEqual(yaxis.major_label_text_font_size, '22px')
 
     def test_element_font_scaling_fontsize_override_specific(self):
         curve = Curve(range(10)).options(
@@ -63,16 +74,20 @@ class TestElementPlot(LoggingComparisonTestCase, TestBokehPlot):
         yaxis = plot.handles['yaxis']
         self.assertEqual(fig.title.text_font_size, {'value': '200%'})
         self.assertEqual(xaxis.axis_label_text_font_size, '24pt')
-        self.assertEqual(yaxis.axis_label_text_font_size, '20pt')
         self.assertEqual(xaxis.major_label_text_font_size, '2.4em')
-        self.assertEqual(yaxis.major_label_text_font_size, '16pt')
-        
+        if bokeh_version < '2.0.2':
+            self.assertEqual(yaxis.axis_label_text_font_size, '20pt')
+            self.assertEqual(yaxis.major_label_text_font_size, '16pt')
+        else:
+            self.assertEqual(yaxis.axis_label_text_font_size, '26px')
+            self.assertEqual(yaxis.major_label_text_font_size, '22px')
+
     def test_element_xaxis_top(self):
         curve = Curve(range(10)).options(xaxis='top')
         plot = bokeh_renderer.get_plot(curve)
         xaxis = plot.handles['xaxis']
         self.assertTrue(xaxis in plot.state.above)
-        
+
     def test_element_xaxis_bare(self):
         curve = Curve(range(10)).options(xaxis='bare')
         plot = bokeh_renderer.get_plot(curve)
@@ -757,7 +772,7 @@ class TestElementPlot(LoggingComparisonTestCase, TestBokehPlot):
 
 
 
-class TestColorbarPlot(TestBokehPlot):
+class TestColorbarPlot(LoggingComparisonTestCase, TestBokehPlot):
 
     def test_colormapper_symmetric(self):
         img = Image(np.array([[0, 1], [2, 3]])).options(symmetric=True)
@@ -765,6 +780,21 @@ class TestColorbarPlot(TestBokehPlot):
         cmapper = plot.handles['color_mapper']
         self.assertEqual(cmapper.low, -3)
         self.assertEqual(cmapper.high, 3)
+
+    def test_colormapper_logz_int_zero_bound(self):
+        img = Image(np.array([[0, 1], [2, 3]])).options(logz=True)
+        plot = bokeh_renderer.get_plot(img)
+        cmapper = plot.handles['color_mapper']
+        self.assertEqual(cmapper.low, 1)
+        self.assertEqual(cmapper.high, 3)
+
+    def test_colormapper_logz_float_zero_bound(self):
+        img = Image(np.array([[0, 1], [2, 3.]])).options(logz=True)
+        plot = bokeh_renderer.get_plot(img)
+        cmapper = plot.handles['color_mapper']
+        self.assertEqual(cmapper.low, 0)
+        self.assertEqual(cmapper.high, 3)
+        self.log_handler.assertContains('WARNING', "Log color mapper lower bound <= 0")
 
     def test_colormapper_color_levels(self):
         cmap = process_cmap('viridis', provider='bokeh')
@@ -798,8 +828,12 @@ class TestColorbarPlot(TestBokehPlot):
         img = Image(np.array([[0, 1], [2, 3]])).opts(colorbar=True, fontscale=2)
         plot = bokeh_renderer.get_plot(img)
         colorbar = plot.handles['colorbar']
-        self.assertEqual(colorbar.title_text_font_size, '20pt')
-        self.assertEqual(colorbar.major_label_text_font_size, '16pt')
+        if bokeh_version < '2.0.2':
+            self.assertEqual(colorbar.title_text_font_size, '20pt')
+            self.assertEqual(colorbar.major_label_text_font_size, '16pt')
+        else:
+            self.assertEqual(colorbar.title_text_font_size, '26px')
+            self.assertEqual(colorbar.major_label_text_font_size, '22px')
 
     def test_explicit_categorical_cmap_on_integer_data(self):
         explicit_mapping = OrderedDict([(0, 'blue'), (1, 'red'), (2, 'green'), (3, 'purple')])
@@ -846,6 +880,16 @@ class TestOverlayPlot(TestBokehPlot):
         plot = bokeh_renderer.get_plot(overlay)
         for sp in plot.subplots.values():
             self.assertTrue(sp.handles['glyph_renderer'].muted)
+
+    def test_overlay_legend_opts(self):
+        overlay = (
+            Curve(np.random.randn(10).cumsum(), label='A') *
+            Curve(np.random.randn(10).cumsum(), label='B')
+        ).options(legend_opts={'background_fill_alpha': 0.5, 'background_fill_color': 'red'})
+        plot = bokeh_renderer.get_plot(overlay)
+        legend = plot.state.legend
+        self.assertEqual(legend.background_fill_alpha, 0.5)
+        self.assertEqual(legend.background_fill_color, 'red')
 
     def test_active_tools_drag(self):
         curve = Curve([1, 2, 3])

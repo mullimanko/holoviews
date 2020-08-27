@@ -19,11 +19,13 @@ import param
 from panel.config import config
 from panel.io.notebook import push
 from panel.io.state import state
+from panel.io.server import unlocked
 from pyviz_comms import JupyterComm
 
 from ..selection import NoOpSelectionDisplay
 from ..core import OrderedDict
 from ..core import util, traversal
+from ..core.data import Dataset
 from ..core.element import Element, Element3D
 from ..core.overlay import Overlay, CompositeOverlay
 from ..core.layout import Empty, NdLayout, Layout
@@ -232,6 +234,7 @@ class Plot(param.Parameterized):
                         for d, k in zip(self.dimensions, key))
             stream_key = util.wrap_tuple_streams(key, self.dimensions, self.streams)
 
+
             self._trigger_refresh(stream_key)
             if self.top_level:
                 self.push()
@@ -248,7 +251,8 @@ class Plot(param.Parameterized):
         "Triggers update to a plot on a refresh event"
         # Update if not top-level, batched or an ElementPlot
         if not self.top_level or isinstance(self, GenericElementPlot):
-            self.update(key)
+            with unlocked():
+                self.update(key)
 
 
     def push(self):
@@ -623,11 +627,12 @@ class DimensionedPlot(Plot):
             elif key is not None: # Traverse to get elements for each frame
                 frame = self._get_frame(key)
                 elements = [] if frame is None else frame.traverse(return_fn, [group])
+            
             # Only compute ranges if not axiswise on a composite plot
             # or not framewise on a Overlay or ElementPlot
             if (not (axiswise and not isinstance(obj, HoloMap)) or
                 (not framewise and isinstance(obj, HoloMap))):
-                self._compute_group_range(group, elements, ranges, framewise)
+                self._compute_group_range(group, elements, ranges, framewise, self.top_level)
         self.ranges.update(ranges)
         return ranges
 
@@ -679,10 +684,11 @@ class DimensionedPlot(Plot):
 
 
     @classmethod
-    def _compute_group_range(cls, group, elements, ranges, framewise):
+    def _compute_group_range(cls, group, elements, ranges, framewise, top_level):
         # Iterate over all elements in a normalization group
         # and accumulate their ranges into the supplied dictionary.
         elements = [el for el in elements if el is not None]
+        prev_ranges = ranges.get(group, {})
         group_ranges = OrderedDict()
         for el in elements:
             if isinstance(el, (Empty, Table)): continue
@@ -693,11 +699,12 @@ class DimensionedPlot(Plot):
             for k, v in dict(opts.kwargs, **plot_opts.kwargs).items():
                 if not isinstance(v, dim) or ('color' not in k and k != 'magnitude'):
                     continue
+
                 if isinstance(v, dim) and v.applies(el):
                     dim_name = repr(v)
-                    if dim_name in ranges.get(group, {}) and not framewise:
+                    if dim_name in prev_ranges and not framewise:
                         continue
-                    values = v.apply(el, expanded=False, all_values=True)
+                    values = v.apply(el, all_values=True)
                     factors = None
                     if values.dtype.kind == 'M':
                         drange = values.min(), values.max()
@@ -714,6 +721,7 @@ class DimensionedPlot(Plot):
                             factors = util.unique_array(values)
                     if dim_name not in group_ranges:
                         group_ranges[dim_name] = {'data': [], 'hard': [], 'soft': []}
+    
                     if factors is not None:
                         if 'factors' not in group_ranges[dim_name]:
                             group_ranges[dim_name]['factors'] = []
@@ -724,7 +732,7 @@ class DimensionedPlot(Plot):
             # Compute dimension normalization
             for el_dim in el.dimensions('ranges'):
                 dim_name = el_dim.name
-                if dim_name in ranges.get(group, {}) and not framewise:
+                if dim_name in prev_ranges and not framewise:
                     continue
                 if hasattr(el, 'interface'):
                     if isinstance(el, Graph) and el_dim in el.nodes.dimensions():
@@ -742,6 +750,9 @@ class DimensionedPlot(Plot):
                     data_range = ('', '')
                 elif isinstance(el, Graph) and el_dim in el.kdims[:2]:
                     data_range = el.nodes.range(2, dimension_range=False)
+                elif el_dim.values:
+                    ds = Dataset(el_dim.values, el_dim)
+                    data_range = ds.range(el_dim, dimension_range=False)
                 else:
                     data_range = el.range(el_dim, dimension_range=False)
 
@@ -796,10 +807,21 @@ class DimensionedPlot(Plot):
                 dranges['factors'] = util.unique_array([
                     v for fctrs in values['factors'] for v in fctrs])
             dim_ranges.append((gdim, dranges))
-        if group not in ranges:
-            ranges[group] = OrderedDict(dim_ranges)
+        if prev_ranges and not (framewise and top_level):
+            for d, dranges in dim_ranges:
+                for g, drange in dranges.items():
+                    prange = prev_ranges.get(d, {}).get(g, None)
+                    if prange is None:
+                        if d not in prev_ranges:
+                            prev_ranges[d] = {}
+                        prev_ranges[d][g] = drange
+                    elif g == 'factors':
+                        prev_ranges[d][g] = drange
+                    else:
+                        prev_ranges[d][g] = util.max_range([prange, drange],
+                                                           combined=g=='hard')
         else:
-            ranges[group].update(OrderedDict(dim_ranges))
+            ranges[group] = OrderedDict(dim_ranges)
 
 
     @classmethod

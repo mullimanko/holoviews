@@ -149,7 +149,8 @@ class PandasInterface(Interface):
     def validate(cls, dataset, vdims=True):
         dim_types = 'all' if vdims else 'key'
         dimensions = dataset.dimensions(dim_types, label='name')
-        not_found = [d for d in dimensions if d not in dataset.data.columns]
+        cols = list(dataset.data.columns)
+        not_found = [d for d in dimensions if d not in cols]
         if not_found:
             raise DataError("Supplied data does not contain specified "
                             "dimensions, the following dimensions were "
@@ -165,7 +166,10 @@ class PandasInterface(Interface):
                 column = column.sort(inplace=False)
             else:
                 column = column.sort_values()
-            column = column[~column.isin([None])]
+            try:
+                column = column[~column.isin([None])]
+            except:
+                pass
             if not len(column):
                 return np.NaN, np.NaN
             return column.iloc[0], column.iloc[-1]
@@ -263,7 +267,8 @@ class PandasInterface(Interface):
     @classmethod
     def mask(cls, dataset, mask, mask_value=np.nan):
         masked = dataset.data.copy()
-        masked[mask] = mask_value
+        cols = [vd.name for vd in dataset.vdims]
+        masked.loc[mask, cols] = mask_value
         return masked
 
 

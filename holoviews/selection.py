@@ -11,7 +11,6 @@ from .core.options import CallbackError, Store
 from .core.overlay import NdOverlay, Overlay
 from .core.spaces import GridSpace
 from .streams import SelectionExpr, PlotReset, Stream
-from .operation.element import function
 from .util import DynamicMap
 from .util.transform import dim
 
@@ -65,7 +64,12 @@ class _base_link_selections(param.ParameterizedFunction):
         selection expressions in response to user interaction events
         """
         # Create stream that produces element that displays region of selection
-        if getattr(hvobj, "_selection_streams", ()):
+        if isinstance(hvobj, DynamicMap):
+            eltype = hvobj.type
+        else:
+            eltype = type(hvobj)
+
+        if getattr(eltype, "_selection_streams", ()):
             self._region_streams[hvobj] = _RegionElement()
 
         # Create SelectionExpr stream
@@ -86,10 +90,15 @@ class _base_link_selections(param.ParameterizedFunction):
         # Apply kwargs as params
         self.param.set_param(**kwargs)
 
-        # Perform transform
-        hvobj_selection = self._selection_transform(hvobj.clone(link=False))
+        if Store.current_backend not in Store.renderers:
+            raise RuntimeError("Cannot peform link_selections operation "
+                               "since the selected backend %r is not "
+                               "loaded. Load the plotting extension with "
+                               "hv.extension or import the plotting "
+                               "backend explicitly." % Store.current_backend)
 
-        return hvobj_selection
+        # Perform transform
+        return self._selection_transform(hvobj.clone())
 
     def _selection_transform(self, hvobj, operations=()):
         """
@@ -99,19 +108,10 @@ class _base_link_selections(param.ParameterizedFunction):
         from .plotting.util import initialize_dynamic
         if isinstance(hvobj, DynamicMap):
             callback = hvobj.callback
-            ninputs = len(callback.inputs)
-            if ninputs == 1:
-                child_hvobj = callback.inputs[0]
-                if callback.operation:
-                    next_op = {'op': callback.operation, 'kwargs': callback.operation_kwargs}
-                else:
-                    fn = function.instance(fn=callback.callable)
-                    next_op = {'op': fn, 'kwargs': callback.operation_kwargs}
-                new_operations = (next_op,) + operations
-                return self._selection_transform(child_hvobj, new_operations)
-            elif ninputs == 2:
-                return Overlay([self._selection_transform(el)
-                                for el in hvobj.callback.inputs]).collate()
+            if len(callback.inputs) > 1:
+                return Overlay([
+                    self._selection_transform(el) for el in callback.inputs
+                ]).collate()
 
             initialize_dynamic(hvobj)
             if issubclass(hvobj.type, Element):
@@ -138,9 +138,21 @@ class _base_link_selections(param.ParameterizedFunction):
         elif isinstance(hvobj, (Layout, Overlay, NdOverlay, GridSpace)):
             data = OrderedDict([(k, self._selection_transform(v, operations))
                                  for k, v in hvobj.items()])
-            new_hvobj = hvobj.clone(data)
-            if hasattr(new_hvobj, 'collate'):
-                new_hvobj = new_hvobj.collate()
+            if isinstance(hvobj, NdOverlay):
+                def compose(*args, **kwargs):
+                    new = []
+                    for k, v in data.items():
+                        for i, el in enumerate(v[()]):
+                            if i == len(new):
+                                new.append([])
+                            new[i].append((k, el))
+                    return Overlay([hvobj.clone(n) for n in new])
+                new_hvobj = DynamicMap(compose)
+                new_hvobj.callback.inputs[:] = list(data.values())
+            else:
+                new_hvobj = hvobj.clone(data)
+                if hasattr(new_hvobj, 'collate'):
+                    new_hvobj = new_hvobj.collate()
             return new_hvobj
         else:
              # Unsupported object
@@ -154,7 +166,7 @@ class _base_link_selections(param.ParameterizedFunction):
         """
         raise NotImplementedError()
 
-    def _expr_stream_updated(self, hvobj, selection_expr, bbox, region_element):
+    def _expr_stream_updated(self, hvobj, selection_expr, bbox, region_element, **kwargs):
         """
         Called when one of the registered HoloViews objects produces a new
         selection expression.  Subclasses should override this method, and
@@ -279,7 +291,7 @@ class link_selections(_base_link_selections):
         """
         return None if self.selected_color is None else _color_to_cmap(self.selected_color)
 
-    def _expr_stream_updated(self, hvobj, selection_expr, bbox, region_element):
+    def _expr_stream_updated(self, hvobj, selection_expr, bbox, region_element, **kwargs):
         if selection_expr:
             if self.cross_filter_mode == "overwrite":
                 # clear other regions and selections
@@ -357,6 +369,52 @@ class SelectionDisplay(object):
     def build_selection(self, selection_streams, hvobj, operations, region_stream=None):
         raise NotImplementedError()
 
+    @staticmethod
+    def _select(element, selection_expr, cache={}):
+        from .element import Curve, Spread
+        from .util.transform import dim
+        if isinstance(selection_expr, dim):
+            dataset = element.dataset
+            mask = None
+            if dataset._plot_id in cache:
+                ds_cache = cache[dataset._plot_id]
+                if selection_expr in ds_cache:
+                    mask = ds_cache[selection_expr]
+                else:
+                    ds_cache.clear()
+            else:
+                ds_cache = cache[dataset._plot_id] = {}
+            try:
+                if dataset.interface.gridded:
+                    if mask is None:
+                        mask = selection_expr.apply(dataset, expanded=True, flat=False, strict=False)
+                    selection = dataset.clone(dataset.interface.mask(dataset, ~mask))
+                elif dataset.interface.multi:
+                    if mask is None:
+                        mask = selection_expr.apply(dataset, expanded=False, flat=False, strict=False)
+                    selection = dataset.iloc[mask]
+                elif isinstance(element, (Curve, Spread)) and hasattr(dataset.interface, 'mask'):
+                    if mask is None:
+                        mask = selection_expr.apply(dataset, compute=False, strict=False)
+                    selection = dataset.clone(dataset.interface.mask(dataset, ~mask))
+                else:
+                    if mask is None:
+                        mask = selection_expr.apply(dataset, compute=False, keep_index=True, strict=False)
+                    selection = dataset.select(selection_mask=mask)
+            except KeyError as e:
+                key_error = str(e).replace('"', '').replace('.', '')
+                raise CallbackError("linked_selection aborted because it could not "
+                                    "display selection for all elements: %s on '%r'."
+                                    % (key_error, element))
+            except Exception as e:
+                raise CallbackError("linked_selection aborted because it could not "
+                                    "display selection for all elements: %s." % e)
+            ds_cache[selection_expr] = mask
+        else:
+            selection = element
+        return selection
+
+
 
 class NoOpSelectionDisplay(SelectionDisplay):
     """
@@ -381,6 +439,7 @@ class OverlaySelectionDisplay(SelectionDisplay):
             self.color_props = color_prop
         self.is_cmap = is_cmap
         self.supports_region = supports_region
+        self._cache = {}
 
     def _get_color_kwarg(self, color):
         return {color_prop: [color] if self.is_cmap else color
@@ -397,31 +456,12 @@ class OverlaySelectionDisplay(SelectionDisplay):
         for layer_number in range(num_layers):
             streams = [selection_streams.exprs_stream]
             obj = hvobj.clone(link=False) if layer_number == 1 else hvobj
+            cmap_stream = selection_streams.cmap_streams[layer_number]
             layer = obj.apply(
-                self._build_layer_callback, streams=streams,
+                self._build_layer_callback, streams=[cmap_stream]+streams,
                 layer_number=layer_number, per_element=True
             )
             layers.append(layer)
-
-        # Wrap in operations
-        for op in operations:
-            op, kws = op['op'], op['kwargs']
-            for layer_number in range(num_layers):
-                streams = list(op.streams)
-                cmap_stream = selection_streams.cmap_streams[layer_number]
-                kwargs = dict(kws)
-
-                # Handle cmap as an operation parameter
-                if 'cmap' in op.param or 'cmap' in kwargs:
-                    if layer_number == 0 or (op.cmap is None and kwargs.get('cmap') is None):
-                        streams += [cmap_stream]
-                    else:
-                        @param.depends(cmap=cmap_stream.param.cmap)
-                        def update_cmap(cmap, default=op.cmap, kw=kwargs.get('cmap')):
-                            return cmap or kw or default
-                        kwargs['cmap'] = update_cmap
-                new_op = op.instance(streams=streams)
-                layers[layer_number] = new_op(layers[layer_number], **kwargs)
 
         for layer_number in range(num_layers):
             layer = layers[layer_number]
@@ -438,19 +478,37 @@ class OverlaySelectionDisplay(SelectionDisplay):
             def update_region(element, region_element, colors, **kwargs):
                 unselected_color = colors[0]
                 if region_element is None:
-                    region_element = element._get_selection_expr_for_stream_value()[2]
+                    region_element = element._empty_region()
                 return self._style_region_element(region_element, unselected_color)
 
             streams = [region_stream, selection_streams.style_stream]
-            region = hvobj.clone(link=False).apply(update_region, streams)
-            if getattr(hvobj, '_selection_dims', None) == 1 or isinstance(hvobj, Histogram):
+            region = hvobj.clone(link=False).apply(update_region, streams, link_dataset=False)
+
+            eltype = hvobj.type if isinstance(hvobj, DynamicMap) else type(hvobj)
+            if getattr(eltype, '_selection_dims', None) == 1 or issubclass(eltype, Histogram):
                 layers.insert(1, region)
             else:
                 layers.append(region)
         return Overlay(layers).collate()
 
-    def _build_layer_callback(self, element, exprs, layer_number, **kwargs):
-        return self._select(element, exprs[layer_number])
+    @classmethod
+    def _inject_cmap_in_pipeline(cls, pipeline, cmap):
+        operations = []
+        for op in pipeline.operations:
+            if hasattr(op, 'cmap'):
+                op = op.instance(cmap=cmap)
+            operations.append(op)
+        return pipeline.instance(operations=operations)
+
+    def _build_layer_callback(self, element, exprs, layer_number, cmap, **kwargs):
+        selection = self._select(element, exprs[layer_number], self._cache)
+        pipeline = element.pipeline
+        if cmap is not None:
+            pipeline = self._inject_cmap_in_pipeline(pipeline, cmap)
+        if element is selection:
+            return pipeline(element.dataset)
+        else:
+            return pipeline(selection)
 
     def _apply_style_callback(self, element, layer_number, colors, cmap, alpha, **kwargs):
         opts = {}
@@ -468,33 +526,6 @@ class OverlaySelectionDisplay(SelectionDisplay):
 
     def _style_region_element(self, region_element, unselected_cmap):
         raise NotImplementedError()
-
-    @staticmethod
-    def _select(element, selection_expr):
-        from .element import Curve, Spread
-        from .util.transform import dim
-        if isinstance(selection_expr, dim):
-            dataset = element.dataset
-            try:
-                if dataset.interface.gridded:
-                    mask = selection_expr.apply(dataset, expanded=True, flat=False, strict=True)
-                    selection = dataset.clone(dataset.interface.mask(dataset, ~mask))
-                elif isinstance(element, (Curve, Spread)) and hasattr(dataset.interface, 'mask'):
-                    mask = selection_expr.apply(dataset, compute=False, strict=True)
-                    selection = dataset.clone(dataset.interface.mask(dataset, ~mask))
-                else:
-                    mask = selection_expr.apply(dataset, compute=False, keep_index=True, strict=True)
-                    selection = dataset.select(selection_mask=mask)
-                element = element.pipeline(selection)
-            except KeyError as e:
-                key_error = str(e).replace('"', '').replace('.', '')
-                raise CallbackError("linked_selection aborted because it could not "
-                                    "display selection for all elements: %s on '%r'."
-                                    % (key_error, element))
-            except Exception as e:
-                raise CallbackError("linked_selection aborted because it could not "
-                                    "display selection for all elements: %s." % e)
-        return element
 
 
 class ColorListSelectionDisplay(SelectionDisplay):

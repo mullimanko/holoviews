@@ -83,6 +83,7 @@ class iloc(Accessor):
     integer indices, slices, lists and arrays of values. For more
     information see the ``Dataset.iloc`` property docstring.
     """
+
     @classmethod
     def _perform_getitem(cls, dataset, index):
         index = util.wrap_tuple(index)
@@ -99,7 +100,7 @@ class iloc(Accessor):
         data = dataset.interface.iloc(dataset, (rows, cols))
         kdims = dataset.kdims
         vdims = dataset.vdims
-        if np.isscalar(data):
+        if util.isscalar(data):
             return data
         elif cols == slice(None):
             pass
@@ -113,12 +114,11 @@ class iloc(Accessor):
             kdims = [d for d in dims if d in kdims]
             vdims = [d for d in dims if d in vdims]
 
-        datatype = [dt for dt in dataset.datatype
-                    if dt in Interface.interfaces and
+        datatypes = util.unique_iterator([dataset.interface.datatype]+dataset.datatype)
+        datatype = [dt for dt in datatypes if dt in Interface.interfaces and
                     not Interface.interfaces[dt].gridded]
         if not datatype: datatype = ['dataframe', 'dictionary']
-        return dataset.clone(data, kdims=kdims, vdims=vdims,
-                             datatype=datatype)
+        return dataset.clone(data, kdims=kdims, vdims=vdims, datatype=datatype)
 
 
 class ndloc(Accessor):

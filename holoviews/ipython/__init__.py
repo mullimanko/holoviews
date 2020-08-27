@@ -112,6 +112,7 @@ class notebook_extension(extension):
     _loaded = False
 
     def __call__(self, *args, **params):
+        comms = params.pop('comms', None)
         super(notebook_extension, self).__call__(*args, **params)
         # Abort if IPython not found
         try:
@@ -178,9 +179,13 @@ class notebook_extension(extension):
         resources = list(resources)
         if len(resources) == 0: return
 
+        from panel import config
+        if hasattr(config, 'comms') and comms:
+            config.comms = comms
+
         for r in [r for r in resources if r != 'holoviews']:
             Store.renderers[r].load_nb(inline=p.inline)
-        Renderer.load_nb()
+        Renderer.load_nb(inline=p.inline)
 
         if hasattr(ip, 'kernel') and not loaded:
             Renderer.comm_manager.get_client_comm(notebook_extension._process_comm_msg,

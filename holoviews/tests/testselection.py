@@ -4,8 +4,8 @@ import holoviews as hv
 import pandas as pd
 
 from holoviews.core.util import unicode, basestring
-from holoviews.core.options import Store
-from holoviews.element import ErrorBars, Points, Rectangles, Table
+from holoviews.core.options import Cycle, Store
+from holoviews.element import ErrorBars, Points, Rectangles, Table, VSpan
 from holoviews.plotting.util import linear_gradient
 from holoviews.selection import link_selections
 from holoviews.streams import SelectionXY
@@ -25,11 +25,9 @@ hist_region_color = linear_gradient(unselected_color, "#000000", 9)[1]
 
 class TestLinkSelections(ComparisonTestCase):
 
-    def setUp(self):
-        if type(self) is TestLinkSelections:
-            # Only run tests in subclasses
-            raise SkipTest("Not supported")
+    __test__ = False
 
+    def setUp(self):
         self.data = pd.DataFrame(
             {'x': [1, 2, 3],
              'y': [0, 3, 2],
@@ -80,7 +78,7 @@ class TestLinkSelections(ComparisonTestCase):
 
         # Check initial state of linked dynamic map
         self.assertIsInstance(current_obj, hv.Overlay)
-        unselected, selected, region = current_obj.values()
+        unselected, selected, region, region2 = current_obj.values()
 
         # Check initial base layer
         self.check_base_points_like(unselected, lnk_sel)
@@ -89,10 +87,10 @@ class TestLinkSelections(ComparisonTestCase):
         self.check_overlay_points_like(selected, lnk_sel, self.data)
 
         # Perform selection of second and third point
-        boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         self.assertIsInstance(boundsxy, hv.streams.SelectionXY)
         boundsxy.event(bounds=(0, 1, 5, 5))
-        unselected, selected, region = linked[()].values()
+        unselected, selected, region, region2 = linked[()].values()
 
         # Check that base layer is unchanged
         self.check_base_points_like(unselected, lnk_sel)
@@ -138,7 +136,7 @@ class TestLinkSelections(ComparisonTestCase):
         )
 
         # Select first and third point
-        boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         boundsxy.event(bounds=(0, 0, 4, 2))
         current_obj = linked[()]
 
@@ -167,6 +165,7 @@ class TestLinkSelections(ComparisonTestCase):
         error = ErrorBars(self.data, kdims='x', vdims=['y', 'e'])
         lnk_sel = link_selections.instance(unselected_color='#ff0000')
         overlay = points * error
+
         if dynamic:
             overlay = hv.util.Dynamic(overlay)
 
@@ -182,8 +181,9 @@ class TestLinkSelections(ComparisonTestCase):
         self.check_overlay_points_like(current_obj.ErrorBars.II, lnk_sel, self.data)
 
         # Select first and third point
-        boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         boundsxy.event(bounds=(0, 0, 4, 2))
+
         current_obj = linked[()]
 
         # Check base layers haven't changed
@@ -195,9 +195,6 @@ class TestLinkSelections(ComparisonTestCase):
                                         self.data.iloc[[0, 2]])
         self.check_overlay_points_like(current_obj.ErrorBars.II, lnk_sel,
                                         self.data.iloc[[0, 2]])
-
-    def test_overlay_points_errorbars_dynamic(self):
-        self.test_overlay_points_errorbars(dynamic=True)
 
     @ds_skip
     def test_datashade_selection(self):
@@ -212,8 +209,7 @@ class TestLinkSelections(ComparisonTestCase):
         self.check_base_points_like(current_obj[0][()].Points.I, lnk_sel)
 
         # Check selection layer
-        self.check_overlay_points_like(current_obj[0][()].Points.II, lnk_sel,
-                                        self.data)
+        self.check_overlay_points_like(current_obj[0][()].Points.II, lnk_sel, self.data)
 
         # Check RGB base layer
         self.assertEqual(
@@ -232,7 +228,7 @@ class TestLinkSelections(ComparisonTestCase):
         )
 
         # Perform selection of second and third point
-        boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         self.assertIsInstance(boundsxy, SelectionXY)
         boundsxy.event(bounds=(0, 1, 5, 5))
         current_obj = linked[()]
@@ -269,7 +265,7 @@ class TestLinkSelections(ComparisonTestCase):
         linked = lnk_sel(points)
 
         # Perform selection of first and (future) third point
-        boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         self.assertIsInstance(boundsxy, hv.streams.SelectionXY)
         boundsxy.event(bounds=(0, 0, 4, 2))
         current_obj = linked[()]
@@ -297,11 +293,10 @@ class TestLinkSelections(ComparisonTestCase):
                                         self.data.iloc[[0, 2]])
 
     def do_crossfilter_points_histogram(
-            self, selection_mode, cross_filter_mode,
-            selected1, selected2, selected3, selected4,
-            points_region1, points_region2, points_region3, points_region4,
-            hist_region2, hist_region3, hist_region4, show_regions=True, dynamic=False
-    ):
+            self, selection_mode, cross_filter_mode, selected1, selected2,
+            selected3, selected4, points_region1, points_region2,
+            points_region3, points_region4, hist_region2, hist_region3,
+            hist_region4, show_regions=True, dynamic=False):
         points = Points(self.data)
         hist = points.hist('x', adjoin=False, normed=False, num_bins=5)
 
@@ -342,20 +337,20 @@ class TestLinkSelections(ComparisonTestCase):
         )
         self.assertEqual(base_hist.data, hist_orig.data)
 
-        # No selection region
-        region_hist = current_obj[1][()].Histogram.II
-        self.assertEqual(region_hist.data, hist_orig.pipeline(hist_orig.dataset.iloc[:0]).data)
-
         # Check initial selection overlay Histogram
-        selection_hist = current_obj[1][()].Histogram.III
+        selection_hist = current_obj[1][()].Histogram.II
         self.assertEqual(
             self.element_color(selection_hist),
             self.expected_selection_color(selection_hist, lnk_sel)
         )
-        self.assertEqual(selection_hist.data, hist_orig.data)
+        self.assertEqual(selection_hist, base_hist)
+
+        # No selection region
+        region_hist = current_obj[1][()].NdOverlay.I.last
+        self.assertEqual(region_hist.data, [None, None])
 
         # (1) Perform selection on points of points [1, 2]
-        points_boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        points_boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         self.assertIsInstance(points_boundsxy, SelectionXY)
         points_boundsxy.event(bounds=(1, 1, 4, 4))
 
@@ -382,18 +377,12 @@ class TestLinkSelections(ComparisonTestCase):
                 box_region_color
             )
 
-        # Check histogram bars selected
-        selection_hist = current_obj[1][()].Histogram.III
-        self.assertEqual(
-            selection_hist.data, hist_orig.pipeline(hist_orig.dataset.iloc[selected1]).data
-        )
-
         # (2) Perform selection on histogram bars [0, 1]
-        hist_boundsxy = lnk_sel._selection_expr_streams[1]._source_streams[0]
+        hist_boundsxy = lnk_sel._selection_expr_streams[1].input_streams[0]
         self.assertIsInstance(hist_boundsxy, SelectionXY)
         hist_boundsxy.event(bounds=(0, 0, 2.5, 2))
 
-        points_unsel, points_sel, points_region = current_obj[0][()].values()
+        points_unsel, points_sel, points_region, points_region_poly = current_obj[0][()].values()
 
         # Check points selection overlay
         self.check_overlay_points_like(points_sel, lnk_sel, self.data.iloc[selected2])
@@ -407,10 +396,13 @@ class TestLinkSelections(ComparisonTestCase):
 
         # Check selection region covers first and second bar
         if show_regions:
-            self.assertEqual(self.element_color(region_hist), hist_region_color)
-        self.assertEqual(
-            region_hist.data, hist_orig.pipeline(hist_orig.dataset.iloc[hist_region2]).data
-        )
+            self.assertEqual(self.element_color(region_hist.last), hist_region_color)
+        if not len(hist_region2) and lnk_sel.selection_mode != 'inverse':
+            self.assertEqual(len(region_hist), 1)
+        else:
+            self.assertEqual(
+                region_hist.last.data, [0, 2.5]
+            )
 
         # Check histogram selection overlay
         self.assertEqual(
@@ -422,7 +414,7 @@ class TestLinkSelections(ComparisonTestCase):
         )
 
         # (3) Perform selection on points points [0, 2]
-        points_boundsxy = lnk_sel._selection_expr_streams[0]._source_streams[0]
+        points_boundsxy = lnk_sel._selection_expr_streams[0].input_streams[0]
         self.assertIsInstance(points_boundsxy, SelectionXY)
         points_boundsxy.event(bounds=(0, 0, 4, 2.5))
 
@@ -435,44 +427,47 @@ class TestLinkSelections(ComparisonTestCase):
         self.assertEqual(region_bounds, Rectangles(points_region3))
 
         # Check second and third histogram bars selected
-        selection_hist = current_obj[1][()].Histogram.III
+        selection_hist = current_obj[1][()].Histogram.II
         self.assertEqual(
             selection_hist.data, hist_orig.pipeline(hist_orig.dataset.iloc[selected3]).data
         )
 
         # Check selection region covers first and second bar
-        region_hist = current_obj[1][()].Histogram.II
-        self.assertEqual(
-            region_hist.data,
-            hist_orig.pipeline(hist_orig.dataset.iloc[hist_region3]).data
-        )
+        region_hist = current_obj[1][()].NdOverlay.I.last
+        if not len(hist_region3) and lnk_sel.selection_mode != 'inverse':
+            self.assertEqual(len(region_hist), 1)
+        else:
+            self.assertEqual(region_hist.data, [0, 2.5])
 
         # (4) Perform selection of bars [1, 2]
-        hist_boundsxy = lnk_sel._selection_expr_streams[1]._source_streams[0]
+        hist_boundsxy = lnk_sel._selection_expr_streams[1].input_streams[0]
         self.assertIsInstance(hist_boundsxy, SelectionXY)
         hist_boundsxy.event(bounds=(1.5, 0, 3.5, 2))
 
         # Check points selection overlay
         self.check_overlay_points_like(current_obj[0][()].Points.II, lnk_sel,
-                                        self.data.iloc[selected4])
+                                       self.data.iloc[selected4])
 
         # Check points region bounds
         region_bounds = current_obj[0][()].Rectangles.I
         self.assertEqual(region_bounds, Rectangles(points_region4))
 
         # Check bar selection region
-        region_hist = current_obj[1][()].Histogram.II
+        region_hist = current_obj[1][()].NdOverlay.I.last
         if show_regions:
             self.assertEqual(
                 self.element_color(region_hist), hist_region_color
             )
-        self.assertEqual(
-            region_hist.data,
-            hist_orig.pipeline(hist_orig.dataset.iloc[hist_region4]).data
-        )
+        if not len(hist_region4) and lnk_sel.selection_mode != 'inverse':
+            self.assertEqual(len(region_hist), 1)
+        elif (lnk_sel.cross_filter_mode != 'overwrite' and not
+              (lnk_sel.cross_filter_mode == 'intersect' and lnk_sel.selection_mode == 'overwrite')):
+            self.assertEqual(region_hist.data, [0, 3.5])
+        else:
+            self.assertEqual(region_hist.data, [1.5, 3.5])
 
         # Check bar selection overlay
-        selection_hist = current_obj[1][()].Histogram.III
+        selection_hist = current_obj[1][()].Histogram.II
         self.assertEqual(
             self.element_color(selection_hist),
             self.expected_selection_color(selection_hist, lnk_sel)
@@ -606,6 +601,9 @@ class TestLinkSelections(ComparisonTestCase):
 
 # Backend implementations
 class TestLinkSelectionsPlotly(TestLinkSelections):
+
+    __test__ = True
+
     def setUp(self):
         try:
             import holoviews.plotting.plotly # noqa
@@ -619,20 +617,24 @@ class TestLinkSelectionsPlotly(TestLinkSelections):
         Store.current_backend = self._backend
 
     def element_color(self, element, color_prop=None):
+
         if isinstance(element, Table):
             color = element.opts.get('style').kwargs['fill']
-        elif isinstance(element, Rectangles):
+        elif isinstance(element, (Rectangles, VSpan)):
             color = element.opts.get('style').kwargs['line_color']
         else:
             color = element.opts.get('style').kwargs['color']
 
-        if isinstance(color, (basestring, unicode)):
+        if isinstance(color, (Cycle, basestring, unicode)):
             return color
         else:
             return list(color)
 
 
 class TestLinkSelectionsBokeh(TestLinkSelections):
+
+    __test__ = True
+
     def setUp(self):
         try:
             import holoviews.plotting.bokeh # noqa

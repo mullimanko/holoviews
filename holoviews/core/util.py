@@ -461,6 +461,8 @@ def validate_dynamic_argspec(callback, kdims, streams):
         return kdims
     elif set(kdims).issubset(set(posargs+kwargs)):
         return kdims
+    elif argspec.keywords:
+        return kdims
     else:
         raise KeyError('Callback {name!r} signature over {names} does not accommodate '
                        'required kdims {kdims}'.format(name=name,
@@ -877,7 +879,7 @@ def isfinite(val):
         return finite
     elif isinstance(val, datetime_types+timedelta_types):
         return not isnat(val)
-    elif isinstance(val, basestring):
+    elif isinstance(val, (basestring, bytes)):
         return True
     finite = np.isfinite(val)
     if pd and pandas_version >= '1.0.0':
@@ -973,8 +975,9 @@ def max_range(ranges, combined=True):
                     if not is_nan(v) and v is not None]))
                 return arr[0], arr[-1]
             elif arr.dtype.kind in 'M':
-                return ((arr.min(), arr.max()) if combined else
-                        (arr[:, 0].min(), arr[:, 1].min()))
+                drange = ((arr.min(), arr.max()) if combined else
+                          (arr[:, 0].min(), arr[:, 1].max()))
+                return drange
 
             if combined:
                 return (np.nanmin(arr), np.nanmax(arr))
@@ -1265,6 +1268,23 @@ def is_number(obj):
     else: return False
 
 
+def is_int(obj, int_like=False):
+    """
+    Checks for int types including the native Python type and NumPy-like objects
+
+    Args:
+        obj: Object to check for integer type
+        int_like (boolean): Check for float types with integer value
+
+    Returns:
+        Boolean indicating whether the supplied value is of integer type.
+    """
+    real_int = isinstance(obj, int) or getattr(getattr(obj, 'dtype', None), 'kind', 'o') in 'ui'
+    if real_int or (int_like and hasattr(obj, 'is_integer') and obj.is_integer()):
+        return True
+    return False
+
+
 class ProgressIndicator(param.Parameterized):
     """
     Baseclass for any ProgressIndicator that indicates progress
@@ -1472,6 +1492,13 @@ def is_dask_array(data):
     if 'dask.array' in sys.modules:
         import dask.array as da
     return (da is not None and isinstance(data, da.Array))
+
+
+def is_cupy_array(data):
+    if 'cupy' in sys.modules:
+        import cupy
+        return isinstance(data, cupy.ndarray)
+    return False
 
 
 def get_param_values(data):

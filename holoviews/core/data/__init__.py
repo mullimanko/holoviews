@@ -7,8 +7,10 @@ except ImportError:
 
 import types
 import copy
+
 import numpy as np
 import param
+
 from param.parameterized import add_metaclass, ParameterizedMetaclass
 
 from .. import util
@@ -320,6 +322,16 @@ class Dataset(Element):
         input_transforms = kwargs.pop('transforms', None)
 
         if isinstance(data, Element):
+            if 'kdims' in kwargs:
+                kwargs['kdims'] = [
+                    data.get_dimension(kd) if isinstance(kd, util.basestring) else kd
+                    for kd in kwargs['kdims']
+                ]
+            if 'kdims' in kwargs:
+                kwargs['vdims'] = [
+                    data.get_dimension(vd) if isinstance(vd, util.basestring) else vd
+                    for vd in kwargs['vdims']
+                ]
             pvals = util.get_param_values(data)
             kwargs.update([(l, pvals[l]) for l in ['group', 'label']
                            if l in pvals and l not in kwargs])
@@ -341,16 +353,16 @@ class Dataset(Element):
         super(Dataset, self).__init__(data, **dict(kwargs, **dict(dims, **extra_kws)))
         self.interface.validate(self, validate_vdims)
 
-        self.redim = Redim(self, mode='dataset')
-
         # Handle _pipeline property
         if input_pipeline is None:
             input_pipeline = chain_op.instance()
 
+        kwargs['kdims'] = self.kdims
+        kwargs['vdims'] = self.vdims
         init_op = factory.instance(
             output_type=type(self),
             args=[],
-            kwargs=kwargs,
+            kwargs=dict(kwargs, kdims=self.kdims, vdims=self.vdims),
         )
         self._pipeline = input_pipeline.instance(
             operations=input_pipeline.operations + [init_op],
@@ -359,13 +371,19 @@ class Dataset(Element):
         self._transforms = input_transforms or []
 
         # Handle initializing the dataset property.
-        self._dataset = None
-        if input_dataset is not None:
-            self._dataset = input_dataset.clone(dataset=None, pipeline=None)
-        elif isinstance(input_data, Dataset) and not dataset_provided:
-            self._dataset = input_data._dataset
-        elif type(self) is Dataset:
-            self._dataset = self
+        self._dataset = input_dataset
+        if self._dataset is None and isinstance(input_data, Dataset) and not dataset_provided:
+            if input_data.data is self.data:
+                self._dataset = {'kdims': input_data.kdims, 'vdims': input_data.vdims}
+            else:
+                self._dataset = Dataset(input_data, dataset=None, pipeline=None,
+                                        transforms=None, _validate_vdims=False)
+                if hasattr(self, '_binned'):
+                    self._dataset._binned = self._binned
+
+    @property
+    def redim(self):
+        return Redim(self, mode='dataset')
 
     @property
     def dataset(self):
@@ -373,13 +391,18 @@ class Dataset(Element):
         The Dataset that this object was created from
         """
         if self._dataset is None:
+            if type(self) is Dataset:
+                return self
             datatype = list(util.unique_iterator(self.datatype+Dataset.datatype))
-            dataset = Dataset(self, _validate_vdims=False, datatype=datatype)
+            dataset = Dataset(self, dataset=None, pipeline=None, transforms=None,
+                              _validate_vdims=False, datatype=datatype)
             if hasattr(self, '_binned'):
                 dataset._binned = self._binned
             return dataset
-        else:
-            return self._dataset
+        elif not isinstance(self._dataset, Dataset):
+            return Dataset(self, _validate_vdims=False, **self._dataset)
+        return self._dataset
+
 
     @property
     def pipeline(self):
@@ -1143,21 +1166,12 @@ argument to specify a selection specification""")
                 data = self
                 if link:
                     overrides['plot_id'] = self._plot_id
+        elif self._in_method and 'dataset' not in overrides:
+            overrides['dataset'] = self.dataset
 
-            if 'dataset' not in overrides:
-                overrides['dataset'] = self.dataset
-
-            if 'pipeline' not in overrides:
-                overrides['pipeline'] = self._pipeline
-        elif self._in_method:
-            if 'dataset' not in overrides:
-                overrides['dataset'] = self.dataset
-
-        new_dataset = super(Dataset, self).clone(
+        return super(Dataset, self).clone(
             data, shared_data, new_type, *args, **overrides
         )
-
-        return new_dataset
 
     # Overrides of superclass methods that are needed so that PipelineMeta
     # will find them to wrap with pipeline support

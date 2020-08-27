@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, unicode_literals
 
+import sys
 import warnings
 from types import FunctionType
 
@@ -10,7 +11,9 @@ import bokeh.plotting
 
 from bokeh.core.properties import value
 from bokeh.document.events import ModelChangedEvent
-from bokeh.models import Renderer, Title, Legend, ColorBar, tools
+from bokeh.models import (
+    ColorBar, ColorMapper, Legend, Renderer, Title, tools
+)
 from bokeh.models.axes import CategoricalAxis, DatetimeAxis
 from bokeh.models.formatters import (
     FuncTickFormatter, TickFormatter, MercatorTickFormatter
@@ -29,7 +32,7 @@ from ...core import DynamicMap, CompositeOverlay, Element, Dimension, Dataset
 from ...core.options import abbreviated_exception, SkipRendering
 from ...core import util
 from ...element import Graph, VectorField, Path, Contours, Tiles
-from ...streams import Stream, Buffer
+from ...streams import Stream, Buffer, RangeXY, PlotSize
 from ...util.transform import dim
 from ..plot import GenericElementPlot, GenericOverlayPlot
 from ..util import dynamic_update, process_cmap, color_intervals, dim_range_key
@@ -249,6 +252,11 @@ class ElementPlot(BokehPlot, GenericElementPlot):
             t for t in cb_tools + self.default_tools + self.tools
             if t not in tool_names]
 
+        tool_list = [
+            tools.HoverTool(tooltips=tooltips, tags=['hv_created'], mode=tool, **hover_opts)
+            if tool in ['vline', 'hline'] else tool for tool in tool_list
+        ]
+
         copied_tools = []
         for tool in tool_list:
             if isinstance(tool, tools.Tool):
@@ -370,12 +378,12 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         if xdims is not None and any(xdim.name in ranges and 'factors' in ranges[xdim.name] for xdim in xdims):
             categorical_x = True
         else:
-            categorical_x = any(isinstance(x, util.basestring) for x in (l, r))
+            categorical_x = any(isinstance(x, (util.basestring, bytes)) for x in (l, r))
 
         if ydims is not None and any(ydim.name in ranges and 'factors' in ranges[ydim.name] for ydim in ydims):
             categorical_y = True
         else:
-            categorical_y = any(isinstance(y, util.basestring) for y in (b, t))
+            categorical_y = any(isinstance(y, (util.basestring, bytes)) for y in (b, t))
 
         range_types = (self._x_range_type, self._y_range_type)
         if self.invert_axes: range_types = range_types[::-1]
@@ -793,6 +801,30 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                 else:
                     frame_aspect = plot.frame_height/plot.frame_width
 
+                range_streams = [s for s in self.streams if isinstance(s, RangeXY)]
+                if self.drawn:
+                    current_l, current_r = plot.x_range.start, plot.x_range.end
+                    current_b, current_t = plot.y_range.start, plot.y_range.end
+                    current_xspan, current_yspan = (current_r-current_l), (current_t-current_b)
+                else:
+                    current_l, current_r, current_b, current_t = l, r, b, t
+                    current_xspan, current_yspan = xspan, yspan
+
+                if any(rs._triggering for rs in range_streams):
+                    # If the event was triggered by a RangeXY stream
+                    # event we want to get the latest range span
+                    # values so we do not accidentally trigger a
+                    # loop of events
+                    l, r, b, t = current_l, current_r, current_b, current_t
+                    xspan, yspan = current_xspan, current_yspan
+                    
+                size_streams = [s for s in self.streams if isinstance(s, PlotSize)]
+                if any(ss._triggering for ss in size_streams):
+                    # Do not trigger on frame size changes, this can
+                    # trigger event loops if the tick labels change
+                    # the canvas size
+                    return
+
                 desired_xspan = yspan*(ratio/frame_aspect)
                 desired_yspan = xspan/(ratio/frame_aspect)
                 if ((np.allclose(desired_xspan, xspan, rtol=0.05) and
@@ -800,10 +832,12 @@ class ElementPlot(BokehPlot, GenericElementPlot):
                     not (util.isfinite(xspan) and util.isfinite(yspan))):
                     pass
                 elif desired_yspan >= yspan:
+                    desired_yspan = current_xspan/(ratio/frame_aspect)
                     ypad = (desired_yspan-yspan)/2.
                     b, t = b-ypad, t+ypad
                     yupdate = True
                 else:
+                    desired_xspan = current_yspan*(ratio/frame_aspect)
                     xpad = (desired_xspan-xspan)/2.
                     l, r = l-xpad, r+xpad
                     xupdate = True
@@ -1259,6 +1293,9 @@ class ElementPlot(BokehPlot, GenericElementPlot):
         self.handles['selected'] = source.selected
 
         properties = self._glyph_properties(plot, style_element, source, ranges, style)
+        if 'legend_label' in properties and 'legend_field' in mapping:
+            mapping.pop('legend_field')
+
         with abbreviated_exception():
             renderer, glyph = self._init_glyph(plot, mapping, properties)
         self.handles['glyph'] = glyph
@@ -1592,7 +1629,8 @@ class ColorbarPlot(ElementPlot):
                                       'opts': {'location': 'bottom_right',
                                                'orientation': 'horizontal'}}}
 
-    color_levels = param.ClassSelector(default=None, class_=(int, list), doc="""
+    color_levels = param.ClassSelector(default=None, class_=(
+        (int, list) + ((range,) if sys.version_info.major > 2 else ())), doc="""
         Number of discrete colors to use when colormapping or a set of color
         intervals defining the range of values to map each color to.""")
 
@@ -1600,7 +1638,7 @@ class ColorbarPlot(ElementPlot):
         An explicit override of the color bar label, if set takes precedence
         over the title key in colorbar_opts.""")
 
-    clim = param.NumericTuple(default=(np.nan, np.nan), length=2, doc="""
+    clim = param.Tuple(default=(np.nan, np.nan), length=2, doc="""
        User-specified colorbar axis range limits for the plot, as a tuple (low,high).
        If specified, takes precedence over data and dimension ranges.""")
 
@@ -1694,12 +1732,17 @@ class ColorbarPlot(ElementPlot):
 
         # Attempt to find matching colormapper on the adjoined plot
         if self.adjoined:
-            cmapper_name = dim_name+name
-            cmappers = self.adjoined.traverse(lambda x: (x.handles.get('color_dim'),
-                                                         x.handles.get(name, x.handles.get(cmapper_name))))
-            cmappers = [cmap for cdim, cmap in cmappers if cdim == eldim]
+            cmappers = self.adjoined.traverse(
+                lambda x: (x.handles.get('color_dim'),
+                           x.handles.get(name),
+                           [v for v in x.handles.values()
+                            if isinstance(v, ColorMapper)])
+                )
+            cmappers = [(cmap, mappers) for cdim, cmap, mappers in cmappers
+                        if cdim == eldim]
             if cmappers:
-                cmapper = cmappers[0]
+                cmapper, mappers  = cmappers[0]
+                cmapper = cmapper if cmapper else mappers[0]
                 self.handles['color_mapper'] = cmapper
                 return cmapper
             else:
@@ -1708,8 +1751,16 @@ class ColorbarPlot(ElementPlot):
         ncolors = None if factors is None else len(factors)
         if eldim:
             # check if there's an actual value (not np.nan)
-            if dim_name in ranges:
+            if all(util.isfinite(cl) for cl in self.clim):
+                low, high = self.clim
+            elif dim_name in ranges:
                 low, high = ranges[dim_name]['combined']
+                dlow, dhigh = ranges[dim_name]['data']
+                if (util.is_int(low, int_like=True) and
+                    util.is_int(high, int_like=True) and
+                    util.is_int(dlow) and
+                    util.is_int(dhigh)):
+                    low, high = int(low), int(high)
             elif isinstance(eldim, dim):
                 low, high = np.nan, np.nan
             else:
@@ -1717,10 +1768,8 @@ class ColorbarPlot(ElementPlot):
             if self.symmetric:
                 sym_max = max(abs(low), high)
                 low, high = -sym_max, sym_max
-            if util.isfinite(self.clim[0]):
-                low = self.clim[0]
-            if util.isfinite(self.clim[1]):
-                high = self.clim[1]
+            low = self.clim[0] if util.isfinite(self.clim[0]) else low
+            high = self.clim[1] if util.isfinite(self.clim[1]) else high
         else:
             low, high = None, None
 
@@ -1817,7 +1866,21 @@ class ColorbarPlot(ElementPlot):
 
     def _get_cmapper_opts(self, low, high, factors, colors):
         if factors is None:
-            colormapper = LogColorMapper if self.logz else LinearColorMapper
+            colormapper = LinearColorMapper
+            if self.logz:
+                colormapper = LogColorMapper
+                if util.is_int(low) and util.is_int(high) and low == 0:
+                    low = 1
+                    if 'min' not in colors:
+                        # Make integer 0 be transparent
+                        colors['min'] = 'rgba(0, 0, 0, 0)'
+                elif util.is_number(low) and low <= 0:
+                    self.param.warning(
+                        "Log color mapper lower bound <= 0 and will not "
+                        "render corrrectly. Ensure you set a positive "
+                        "lower bound on the color dimension or using "
+                        "the `clim` option."
+                    )
             if isinstance(low, (bool, np.bool_)): low = int(low)
             if isinstance(high, (bool, np.bool_)): high = int(high)
             # Pad zero-range to avoid breaking colorbar (as of bokeh 1.0.4)
@@ -1881,6 +1944,9 @@ class LegendPlot(ElementPlot):
     legend_specs = {'right': 'right', 'left': 'left', 'top': 'above',
                     'bottom': 'below'}
 
+    legend_opts = param.Dict(default={}, doc="""
+        Allows setting specific styling options for the colorbar.""")
+
     def _process_legend(self, plot=None):
         plot = plot or self.handles['plot']
         if not plot.legend:
@@ -1904,8 +1970,9 @@ class LegendPlot(ElementPlot):
             else:
                 legend.location = pos
 
-            # Apply muting
+            # Apply muting and misc legend opts
             for leg in plot.legend:
+                leg.update(**self.legend_opts)
                 for item in leg.items:
                     for r in item.renderers:
                         r.muted = self.legend_muted
@@ -2053,8 +2120,9 @@ class OverlayPlot(GenericOverlayPlot, LegendPlot):
             legend.location = self.legend_offset
             plot.add_layout(legend, pos)
 
-        # Apply muting
+        # Apply muting and misc legend opts
         for leg in plot.legend:
+            leg.update(**self.legend_opts)
             for item in leg.items:
                 for r in item.renderers:
                     r.muted = self.legend_muted
