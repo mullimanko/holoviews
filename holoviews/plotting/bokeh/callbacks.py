@@ -393,8 +393,7 @@ class ServerCallback(MessageCallback):
                 diff = time.time()-self._last_event
                 timeout = max(timeout-(diff*1000), 50)
         if not pn.state.curdoc:
-            from tornado.ioloop import IOLoop
-            IOLoop.current().call_later(int(timeout)/1000., cb)
+            cb()
         else:
             pn.state.curdoc.add_timeout_callback(cb, int(timeout))
 
@@ -447,7 +446,7 @@ class ServerCallback(MessageCallback):
             self._set_busy(False)
             return
         throttled = self.throttled()
-        if throttled:
+        if throttled and pn.state.curdoc:
             self._schedule_callback(self.process_on_event, throttled)
             return
         # Get unique event types in the queue
